@@ -221,7 +221,7 @@ function parseTimestamp(src) {
 function parseBMS(src) {
   const stmts = joinCont(src.split("\n"));
   const ts = parseTimestamp(src);
-  const ms = { name: "MAPSET", mode: "INOUT", lang: "COBOL", ctrl: "FREEKB", storage: "AUTO", tioapfx: "YES", maps: [], timestamp: ts?.display || null, timestampRaw: ts?.raw || null };
+  const ms = { name: "MAPSET", mode: "", lang: "", ctrl: "", storage: "", tioapfx: "", maps: [], timestamp: ts?.display || null, timestampRaw: ts?.raw || null };
   let cur = null;
   for (const st of stmts) {
     const m = st.match(/^(\S+)?\s+(DFHM\w+)\s*(.*)/);
@@ -300,11 +300,13 @@ function autoRenumber(ms) {
 function genBMS(ms) {
   const o = [];
   if (ms.timestampRaw) o.push(`*   TIMESTAMP=${ms.timestampRaw}`);
-  o.push(fmtMacro(ms.name, "DFHMSD", [
-    ["TYPE", "&SYSPARM"], ["MODE", ms.mode || "INOUT"],
-    ["LANG", ms.lang || "COBOL"], ["CTRL", ms.ctrl || "FREEKB"],
-    ["STORAGE", ms.storage || "AUTO"], ["TIOAPFX", ms.tioapfx || "NO"],
-  ]));
+  const sdPairs = [["TYPE", "&SYSPARM"]];
+  if (ms.mode)    sdPairs.push(["MODE",    ms.mode]);
+  if (ms.lang)    sdPairs.push(["LANG",    ms.lang]);
+  if (ms.ctrl)    sdPairs.push(["CTRL",    ms.ctrl]);
+  if (ms.storage) sdPairs.push(["STORAGE", ms.storage]);
+  if (ms.tioapfx) sdPairs.push(["TIOAPFX", ms.tioapfx]);
+  o.push(fmtMacro(ms.name, "DFHMSD", sdPairs));
   for (const map of ms.maps) {
     const diPairs = [["SIZE", "(24,80)"], ["COLOR", map.color || "BLUE"], ["EXTATT", map.extatt || "YES"]];
     o.push(fmtMacro(map.name, "DFHMDI", diPairs));
@@ -324,7 +326,7 @@ function genBMS(ms) {
       o.push(fmtMacro(f.name, "DFHMDF", fp));
     }
   }
-  o.push("         DFHMSD TYPE=FINAL");
+  o.push(fmtMacro(ms.name, "DFHMSD", [["TYPE", "FINAL"]]));
   o.push("         END");
   return o.join("\n");
 }
@@ -384,8 +386,7 @@ function BMSEditor() {
 
   const pushMs = useCallback((fnOrVal) => {
     setMapset(prev => {
-      const raw  = typeof fnOrVal === "function" ? fnOrVal(prev) : fnOrVal;
-      const next = autoRenumber(raw);
+      const next = typeof fnOrVal === "function" ? fnOrVal(prev) : fnOrVal;
       if (JSON.stringify(prev) === JSON.stringify(next)) return prev; // no-op
       histRef.current = [...histRef.current.slice(-(MAX_HIST - 1)), JSON.stringify(prev)];
       futRef.current = [];
