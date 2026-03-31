@@ -367,11 +367,19 @@ function BMSEditor() {
   const [rb, setRb] = useState(null);
   const [editId, setEditId] = useState(null);
   const [editTxt, setEditTxt] = useState("");
+  const [editSel, setEditSel] = useState({s:0, e:0});
+  const editInputRef = useRef(null);
+  const editAnchorRef = useRef(0);
+  const syncSel = () => {
+    const el = editInputRef.current;
+    if (el) setEditSel({s: el.selectionStart??0, e: el.selectionEnd??0});
+  };
   const [showImp, setShowImp] = useState(false);
   const [showExp, setShowExp] = useState(false);
   const [impTxt, setImpTxt] = useState("");
   const [showMs, setShowMs] = useState(false);
   const [placingType, setPlacingType] = useState(null);
+  const [dragCopy, setDragCopy] = useState(false);
   const gridRef = useRef(null);
   const modeRef = useRef(mode);
   const dragRef = useRef({ start: null, delta: { dx: 0, dy: 0 } });
@@ -440,11 +448,17 @@ function BMSEditor() {
     const x = e.clientX - rect.left, y = e.clientY - rect.top;
     const hit = findAt(x, y);
 
+    if (hit && editId === hit.id) return; // deixa o input invisível tratar
     if (hit) {
       let newSel;
+      let pendingDesel = null;
       if (e.ctrlKey || e.metaKey) {
         newSel = new Set(selIds);
-        newSel.has(hit.id) ? newSel.delete(hit.id) : newSel.add(hit.id);
+        if (newSel.has(hit.id)) {
+          pendingDesel = hit.id; // defer deselect to onUp — might be a drag-copy
+        } else {
+          newSel.add(hit.id);
+        }
       } else if (!selIds.has(hit.id)) {
         newSel = new Set([hit.id]);
       } else {
@@ -452,7 +466,8 @@ function BMSEditor() {
       }
       setSelIds(newSel);
       setMode("dragging");
-      dragRef.current = { start: { x, y }, delta: { dx: 0, dy: 0 }, selIds: newSel };
+      setDragCopy(e.ctrlKey || e.metaKey);
+      dragRef.current = { start: { x, y }, delta: { dx: 0, dy: 0 }, selIds: newSel, pendingDesel };
       setDragStart({ x, y });
       setDragDelta({ dx: 0, dy: 0 });
     } else {
@@ -481,23 +496,51 @@ function BMSEditor() {
       }
     };
 
-    const onUp = () => {
+    const onKey = (e) => { if (modeRef.current === "dragging") setDragCopy(e.ctrlKey || e.metaKey); };
+
+    const onUp = (e) => {
       if (modeRef.current === "dragging") {
         const d = dragRef.current.delta;
         const dC = Math.round(d.dx / CELL_W), dR = Math.round(d.dy / CELL_H);
         if (dC !== 0 || dR !== 0) {
           const ids = dragRef.current.selIds || selIds;
-          pushMs(ms => {
-            const n = JSON.parse(JSON.stringify(ms));
-            for (const f of n.maps[mapIdx].fields) {
-              if (ids.has(f.id)) {
-                f.row = clamp(f.row + dR, 1, ROWS);
-                f.col = clamp(f.col + dC, 1, COLS - f.length + 1);
-              }
+          if (e.ctrlKey || e.metaKey) {
+            // Copiar: gera novos ids antes para poder selecionar depois
+            const idMap = new Map();
+            for (const f of fields) {
+              if (ids.has(f.id)) idMap.set(f.id, gid());
             }
-            return n;
-          });
+            pushMs(ms => {
+              const n = JSON.parse(JSON.stringify(ms));
+              for (const f of n.maps[mapIdx].fields) {
+                if (ids.has(f.id)) {
+                  n.maps[mapIdx].fields.push({ ...f, id: idMap.get(f.id),
+                    row: clamp(f.row + dR, 1, ROWS),
+                    col: clamp(f.col + dC, 1, COLS - f.length + 1),
+                  });
+                }
+              }
+              return n;
+            });
+            setSelIds(new Set(idMap.values()));
+          } else {
+            pushMs(ms => {
+              const n = JSON.parse(JSON.stringify(ms));
+              for (const f of n.maps[mapIdx].fields) {
+                if (ids.has(f.id)) {
+                  f.row = clamp(f.row + dR, 1, ROWS);
+                  f.col = clamp(f.col + dC, 1, COLS - f.length + 1);
+                }
+              }
+              return n;
+            });
+          }
+        } else if (dragRef.current.pendingDesel) {
+          // Ctrl+click with no movement = toggle off
+          const id = dragRef.current.pendingDesel;
+          setSelIds(prev => { const n = new Set(prev); n.delete(id); return n; });
         }
+        setDragCopy(false);
       } else if (modeRef.current === "rubberband" && rbRef.current) {
         const r = rbRef.current;
         const rx1 = Math.min(r.x1, r.x2), ry1 = Math.min(r.y1, r.y2);
@@ -517,7 +560,14 @@ function BMSEditor() {
 
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-    return () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("keyup", onKey);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keyup", onKey);
+    };
   }, [mode, fields, selIds, mapIdx, pushMs]);
 
   /* ── Placement click ── */
@@ -553,7 +603,8 @@ function BMSEditor() {
         e.preventDefault(); redo(); return;
       }
       if (showImp || showExp || showMs) return;
-      if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.key) && selIds.size && !editId) {
+      const inInput = ["INPUT","SELECT","TEXTAREA"].includes(document.activeElement?.tagName);
+      if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.key) && selIds.size && !editId && !inInput) {
         e.preventDefault();
         const dr = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
         const dc = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
@@ -569,19 +620,19 @@ function BMSEditor() {
         });
         return;
       }
-      if ((e.key === "Delete" || e.key === "Backspace") && selIds.size && !editId) {
+      if ((e.key === "Delete" || e.key === "Backspace") && selIds.size && !editId && !inInput) {
         updFields(fs => { for (let i = fs.length - 1; i >= 0; i--) if (selIds.has(fs[i].id)) fs.splice(i, 1); });
         setSelIds(new Set());
       }
-      if (e.key === "F2" && selIds.size === 1 && !editId) {
+      if (e.key === "F2" && selIds.size === 1 && !editId && !inInput) {
         e.preventDefault();
         const id = [...selIds][0];
         const f = fields.find(x => x.id === id);
-        if (f) { setEditId(id); setEditTxt(f.initial); }
+        if (f) { setEditId(id); setEditTxt(f.initial); setEditSel({s:f.initial.length,e:f.initial.length}); }
       }
       if (e.key === "Escape") {
         if (modeRef.current === "placing") { setMode("idle"); placeTemplateRef.current = null; setPlacingType(null); }
-        if (editId) { setEditId(null); setEditTxt(""); }
+        if (editId) { setEditId(null); setEditTxt(""); setEditSel({s:0,e:0}); }
       }
       if (e.key === "a" && (e.ctrlKey || e.metaKey) && !editId) {
         e.preventDefault();
@@ -592,13 +643,22 @@ function BMSEditor() {
     return () => window.removeEventListener("keydown", h);
   }, [selIds, fields, editId, showImp, showExp, showMs, updFields, undo, redo]);
 
+  useEffect(() => {
+    if (editId && editInputRef.current) {
+      editInputRef.current.focus();
+      const len = editInputRef.current.value.length;
+      editInputRef.current.setSelectionRange(len, len);
+      setEditSel({s:len, e:len});
+    }
+  }, [editId]);
+
   const commitEdit = useCallback(() => {
     if (editId) {
       const f = fields.find(x => x.id === editId);
       const upd = { initial: editTxt };
       // Auto-size labels (non-UNPROT) to text length
       if (f && !f.attrs.includes("UNPROT") && editTxt.length > 0) upd.length = editTxt.length;
-      updField(editId, upd); setEditId(null); setEditTxt("");
+      updField(editId, upd); setEditId(null); setEditTxt(""); setEditSel({s:0,e:0});
     }
   }, [editId, editTxt, updField, fields]);
 
@@ -685,22 +745,22 @@ function BMSEditor() {
 
               {fields.map(f=>{
                 const sel = selIds.has(f.id);
-                const dx = mode==="dragging"&&sel?Math.round(dragDelta.dx/CELL_W)*CELL_W:0;
-                const dy = mode==="dragging"&&sel?Math.round(dragDelta.dy/CELL_H)*CELL_H:0;
+                const dx = mode==="dragging"&&sel&&!dragCopy?Math.round(dragDelta.dx/CELL_W)*CELL_W:0;
+                const dy = mode==="dragging"&&sel&&!dragCopy?Math.round(dragDelta.dy/CELL_H)*CELL_H:0;
                 const c = fColor(f);
                 const blinkStyle = f.hilight==="BLINK" ? {animation:"bms-blink 1s step-end infinite"} : {};
                 return (
-                  <div key={f.id} className={`absolute flex items-center ${editId===f.id&&!f.attrs.includes("UNPROT")?"overflow-visible":"overflow-hidden"}`}
+                  <div key={f.id} className={`absolute flex items-center ${editId===f.id?"overflow-visible":"overflow-hidden"}`}
                     style={{left:(f.col-1)*CELL_W+dx,top:(f.row-1)*CELL_H+dy,
-                      width:f.length*CELL_W,height:CELL_H,
+                      width:(editId===f.id&&!f.attrs.includes("UNPROT")?Math.max(f.length,editTxt.length+1):f.length)*CELL_W,height:CELL_H,
                       backgroundColor:c.bg,color:c.fg,fontSize:CELL_W*1.3,
                       lineHeight:CELL_H+"px",
                       border:sel?"1.5px solid #fbbf24":"1px solid rgba(255,255,255,0.06)",
                       boxShadow:sel?"0 0 6px rgba(251,191,36,0.3)":"none",
-                      zIndex:editId===f.id?20:(sel?10:1),cursor:mode==="placing"?"crosshair":"move",
+                      zIndex:editId===f.id?20:(sel?10:1),cursor:mode==="placing"?"crosshair":(mode==="dragging"&&sel&&dragCopy?"copy":"move"),
                       transition:mode==="dragging"?"none":"border-color 0.15s",
                       ...blinkStyle}}
-                    onDoubleClick={(e)=>{e.stopPropagation();setSelIds(new Set([f.id]));setEditId(f.id);setEditTxt(f.initial)}}>
+                    onDoubleClick={(e)=>{e.stopPropagation();setSelIds(new Set([f.id]));setEditId(f.id);setEditTxt(f.initial);setEditSel({s:f.initial.length,e:f.initial.length})}}>
 
                     <div style={{position:"absolute",left:-3,top:2,bottom:2,width:3,borderRadius:"1px 0 0 1px",
                       backgroundColor:f.attrs.includes("UNPROT")?"#33cc33":"#44ccee",opacity:.6}}/>
@@ -709,14 +769,62 @@ function BMSEditor() {
                     )}
 
                     {editId===f.id?(
-                      <input autoFocus value={editTxt} onChange={e=>setEditTxt(e.target.value)}
-                        onBlur={commitEdit}
-                        onKeyDown={e=>{if(e.key==="Enter")commitEdit();if(e.key==="Escape"){setEditId(null);setEditTxt("")}}}
-                        className="h-full bg-transparent outline-none"
-                        style={{color:c.fg,fontSize:CELL_W*1.35,...mono,letterSpacing:0,paddingLeft:0,
-                          width:f.attrs.includes("UNPROT")?f.length*CELL_W:Math.max(f.length,editTxt.length+2)*CELL_W,
-                          position:f.attrs.includes("UNPROT")?"static":"relative",zIndex:20}}
-                        maxLength={f.attrs.includes("UNPROT")?f.length:COLS-f.col+1}/>
+                      <>
+                        <input ref={editInputRef}
+                          style={{position:"absolute",inset:0,opacity:0,cursor:"text",zIndex:25}}
+                          value={editTxt}
+                          onChange={e=>{setEditTxt(e.target.value);syncSel();}}
+                          onMouseDown={e=>{
+                            e.preventDefault();
+                            editInputRef.current?.focus();
+                            const pos=clamp(Math.round((e.clientX-e.currentTarget.getBoundingClientRect().left)/CELL_W),0,editTxt.length);
+                            editAnchorRef.current=pos;
+                            editInputRef.current?.setSelectionRange(pos,pos);
+                            setEditSel({s:pos,e:pos});
+                          }}
+                          onMouseMove={e=>{
+                            if(e.buttons!==1) return;
+                            const pos=clamp(Math.round((e.clientX-e.currentTarget.getBoundingClientRect().left)/CELL_W),0,editTxt.length);
+                            const anch=editAnchorRef.current;
+                            editInputRef.current?.setSelectionRange(Math.min(anch,pos),Math.max(anch,pos));
+                            setEditSel({s:anch,e:pos});
+                          }}
+                          onMouseUp={e=>{
+                            const pos=clamp(Math.round((e.clientX-e.currentTarget.getBoundingClientRect().left)/CELL_W),0,editTxt.length);
+                            const anch=editAnchorRef.current;
+                            editInputRef.current?.setSelectionRange(Math.min(anch,pos),Math.max(anch,pos));
+                            setEditSel({s:anch,e:pos});
+                          }}
+                          onSelect={syncSel}
+                          onKeyDown={e=>{
+                            if(e.key==="Enter"){e.preventDefault();commitEdit();}
+                            if(e.key==="Escape"){e.preventDefault();setEditId(null);setEditTxt("");setEditSel({s:0,e:0});}
+                            requestAnimationFrame(syncSel);
+                          }}
+                          onBlur={commitEdit}
+                          maxLength={f.attrs.includes("UNPROT")?f.length:COLS-f.col+1}/>
+                        {(()=>{
+                          const nCells=Math.max(f.attrs.includes("UNPROT")?f.length:Math.max(f.length,editTxt.length+1),1);
+                          const hasSel=editSel.s!==editSel.e;
+                          const selMin=Math.min(editSel.s,editSel.e), selMax=Math.max(editSel.s,editSel.e);
+                          return(
+                            <div style={{display:"flex",pointerEvents:"none",position:"relative"}}>
+                              {Array.from({length:nCells},(_,i)=>{
+                                const inSel=hasSel&&i>=selMin&&i<selMax;
+                                return(
+                                  <span key={i} style={{width:CELL_W,textAlign:"center",flexShrink:0,display:"inline-block",
+                                    backgroundColor:inSel?c.fg:"transparent",color:inSel?c.bg:"inherit"}}>
+                                    {editTxt[i]||""}
+                                  </span>
+                                );
+                              })}
+                              {!hasSel&&<span style={{position:"absolute",top:2,bottom:2,width:1.5,
+                                left:Math.min(editSel.s,editTxt.length)*CELL_W-0.75,
+                                backgroundColor:c.fg,animation:"bms-blink 0.7s step-end infinite",pointerEvents:"none"}}/>}
+                            </div>
+                          );
+                        })()}
+                      </>
                     ):(
                       <div style={{display:"flex",pointerEvents:"none"}}>
                         {fText(f).split("").map((ch,i)=>(
@@ -725,12 +833,32 @@ function BMSEditor() {
                       </div>
                     )}
 
-                    {sel&&f.name&&(
+                    {sel&&(f.name||dragCopy)&&(
                       <div className="absolute text-xs px-1 rounded" style={{bottom:"100%",left:0,
                         backgroundColor:"#fbbf24",color:"#000",fontSize:8.5,whiteSpace:"nowrap",lineHeight:"14px"}}>
-                        {f.name}
+                        {mode==="dragging"&&dragCopy?"+"+(f.name||""):(f.name||"")}
                       </div>
                     )}
+                  </div>
+                );
+              })}
+
+              {mode==="dragging"&&dragCopy&&(Math.round(dragDelta.dx/CELL_W)!==0||Math.round(dragDelta.dy/CELL_H)!==0)&&fields.filter(f=>selIds.has(f.id)).map(f=>{
+                const gdx=Math.round(dragDelta.dx/CELL_W)*CELL_W;
+                const gdy=Math.round(dragDelta.dy/CELL_H)*CELL_H;
+                const c=fColor(f);
+                return(
+                  <div key={"g"+f.id} className="absolute overflow-hidden pointer-events-none"
+                    style={{left:(f.col-1)*CELL_W+gdx,top:(f.row-1)*CELL_H+gdy,
+                      width:f.length*CELL_W,height:CELL_H,
+                      backgroundColor:c.bg,color:c.fg,fontSize:CELL_W*1.3,lineHeight:CELL_H+"px",
+                      border:"1.5px dashed #fbbf24",boxShadow:"0 0 6px rgba(251,191,36,0.3)",
+                      opacity:0.7,zIndex:15}}>
+                    <div style={{display:"flex"}}>
+                      {fText(f).split("").map((ch,i)=>(
+                        <span key={i} style={{width:CELL_W,textAlign:"center",flexShrink:0}}>{ch}</span>
+                      ))}
+                    </div>
                   </div>
                 );
               })}
