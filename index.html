@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>BMS Editor</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
   <link rel="apple-touch-icon" href="/favicon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -18,7 +18,10 @@
       theme: { extend: { fontFamily: { mono: ["'IBM Plex Mono'", "monospace"] } } }
     };
   </script>
-  <style> html, body, #root { margin: 0; padding: 0; height: 100%; overflow: hidden; } </style>
+  <style>
+    html, body, #root { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+    @keyframes bms-blink { 0%,100%{opacity:1} 50%{opacity:0.15} }
+  </style>
 </head>
 <body>
   <div id="root"></div>
@@ -40,6 +43,44 @@ const ATTR_G = {
   protection: ["ASKIP", "PROT", "UNPROT"],
   intensity: ["NORM", "BRT", "DRK"],
   flags: ["NUM", "IC", "FSET"],
+};
+
+const COLOR_OPTS   = ["DEFAULT","BLUE","GREEN","TURQUOISE","NEUTRAL","RED","PINK","YELLOW","WHITE"];
+const HILIGHT_OPTS = ["OFF","UNDERLINE","BLINK","REVERSE"];
+const CASE_OPTS    = ["UPPER","MIXED"];
+
+const TIPS = {
+  nome:   "Nome do campo no DSECT (≤8 chars, maiúsculo). Vazio = label anônimo, sem entrada no repositório.",
+  linha:  "Posição vertical na tela (1–24).",
+  coluna: "Posição horizontal na tela (1–80).",
+  tam:    "Comprimento do campo em caracteres na tela.",
+  inicial:"Texto exibido ao abrir o mapa. Em labels define o conteúdo fixo; em campos de entrada é o valor pré-preenchido.",
+  picout: "Máscara de formatação de saída (ex: ZZZZ.ZZZ.ZZZ.ZZ9,99). Aplicada pelo CICS ao enviar o valor ao terminal.",
+  picin:  "Máscara de validação de entrada. Aplicada pelo CICS ao receber dados do terminal.",
+  color:  "Cor do texto no terminal 3270. DEFAULT usa a cor padrão determinada pelo atributo de proteção.",
+  hilight:"Realce visual no terminal 3270.\nUNDERLINE = sublinhado\nBLINK = piscante\nREVERSE = vídeo reverso\nOFF = sem realce",
+  case:   "MIXED = aceita maiúsculas e minúsculas. UPPER = converte a entrada para maiúsculo (padrão do CICS).",
+  ASKIP:  "AutoSkip — cursor pula o campo automaticamente. Padrão para labels e campos somente-leitura.",
+  PROT:   "Protected — campo protegido; usuário não pode digitar, mas o cursor pode parar nele.",
+  UNPROT: "Unprotected — campo editável pelo usuário.",
+  NORM:   "Normal — intensidade de exibição padrão.",
+  BRT:    "Bright — alta intensidade (brilhante). Ativa o MDT automaticamente.",
+  DRK:    "Dark — campo invisível na tela. Usado para senhas ou dados ocultos.",
+  NUM:    "Numeric — habilita teclado numérico; terminal aceita apenas dígitos neste campo.",
+  IC:     "Insert Cursor — posiciona o cursor neste campo ao abrir o mapa. Apenas um campo por mapa.",
+  FSET:   "Field Set — força o MDT (Modified Data Tag) ligado; campo sempre enviado ao programa mesmo sem alteração pelo usuário.",
+};
+
+const BMS_COLORS = {
+  DEFAULT:   null,
+  BLUE:      { bg: "#050d1a", fg: "#4488ee" },
+  GREEN:     { bg: "#051205", fg: "#33cc55" },
+  TURQUOISE: { bg: "#041010", fg: "#22ccbb" },
+  NEUTRAL:   { bg: "#0e0e0e", fg: "#aaaaaa" },
+  RED:       { bg: "#1a0505", fg: "#ff5555" },
+  PINK:      { bg: "#1a0510", fg: "#ff88cc" },
+  YELLOW:    { bg: "#191400", fg: "#ddcc22" },
+  WHITE:     { bg: "#101010", fg: "#e0e0e0" },
 };
 
 const SAMPLE = `DEMOSET  DFHMSD TYPE=&SYSPARM,                                        X
@@ -196,7 +237,7 @@ function parseBMS(src) {
       if (p.STORAGE) ms.storage = p.STORAGE;
       if (p.TIOAPFX) ms.tioapfx = p.TIOAPFX;
     } else if (macro === "DFHMDI") {
-      cur = { name: label || "MAP01", fields: [] };
+      cur = { name: label || "MAP01", color: p.COLOR || "BLUE", extatt: p.EXTATT || "YES", fields: [] };
       ms.maps.push(cur);
     } else if (macro === "DFHMDF" && cur) {
       const pos = parsePos(p.POS);
@@ -207,10 +248,13 @@ function parseBMS(src) {
         attrs: parseAttr(p.ATTRB),
         initial: p.INITIAL || "",
         picout: p.PICOUT || "", picin: p.PICIN || "",
+        color:  (p.COLOR  || "DEFAULT").toUpperCase(),
+        hilight:(p.HILIGHT|| "OFF").toUpperCase(),
+        case:   (p.CASE   || "UPPER").toUpperCase(),
       });
     }
   }
-  if (!ms.maps.length) ms.maps.push({ name: "MAP01", fields: [] });
+  if (!ms.maps.length) ms.maps.push({ name: "MAP01", color: "BLUE", extatt: "YES", fields: [] });
   return ms;
 }
 
@@ -232,30 +276,51 @@ function fmtMacro(label, macro, pairs) {
     const sub = rem.slice(0, avail);
     let br = sub.lastIndexOf(",");
     if (br <= 0) br = avail; else br += 1;
-    lines.push((p + rem.slice(0, br)).padEnd(71) + "X");
+    lines.push((p + rem.slice(0, br)).padEnd(71) + "C");
     rem = rem.slice(br);
     first = false;
   }
   return lines.join("\n");
 }
 
+const p2 = n => String(n).padStart(2, "0");
+const p3 = n => String(n).padStart(3, "0");
+
+function autoRenumber(ms) {
+  const n = JSON.parse(JSON.stringify(ms));
+  for (const map of n.maps) {
+    const named = map.fields
+      .filter(f => f.name !== "")
+      .sort((a, b) => a.row - b.row || a.col - b.col);
+    named.forEach((f, i) => { f.name = "CAMPO" + String(i + 1).padStart(3, "0"); });
+  }
+  return n;
+}
+
 function genBMS(ms) {
   const o = [];
-  if (ms.timestampRaw) o.push(`* TIMESTAMP=${ms.timestampRaw}`);
+  if (ms.timestampRaw) o.push(`*   TIMESTAMP=${ms.timestampRaw}`);
   o.push(fmtMacro(ms.name, "DFHMSD", [
     ["TYPE", "&SYSPARM"], ["MODE", ms.mode || "INOUT"],
     ["LANG", ms.lang || "COBOL"], ["CTRL", ms.ctrl || "FREEKB"],
-    ["STORAGE", ms.storage || "AUTO"], ["TIOAPFX", ms.tioapfx || "YES"],
+    ["STORAGE", ms.storage || "AUTO"], ["TIOAPFX", ms.tioapfx || "NO"],
   ]));
   for (const map of ms.maps) {
-    o.push(fmtMacro(map.name, "DFHMDI", [["SIZE", "(24,80)"], ["LINE", "1"], ["COLUMN", "1"]]));
+    const diPairs = [["SIZE", "(24,80)"], ["COLOR", map.color || "BLUE"], ["EXTATT", map.extatt || "YES"]];
+    o.push(fmtMacro(map.name, "DFHMDI", diPairs));
     const sorted = [...map.fields].sort((a, b) => a.row - b.row || a.col - b.col);
     for (const f of sorted) {
-      const fp = [["POS", `(${f.row},${f.col})`], ["LENGTH", String(f.length)]];
-      if (f.attrs.length) fp.push(["ATTRB", `(${f.attrs.join(",")})`]);
+      const fp = [
+        ["POS",    `(${p2(f.row)},${p2(f.col)})`],
+        ["ATTRB",  `(${(f.attrs||[]).join(",")})`],
+        ["COLOR",  f.color  || "DEFAULT"],
+        ["LENGTH", p3(f.length)],
+        ["HILIGHT",f.hilight|| "OFF"],
+      ];
+      if (f.case && f.case !== "UPPER") fp.push(["CASE", f.case]);
       if (f.initial) fp.push(["INITIAL", `'${f.initial}'`]);
-      if (f.picout) fp.push(["PICOUT", `'${f.picout}'`]);
-      if (f.picin) fp.push(["PICIN", `'${f.picin}'`]);
+      if (f.picout)  fp.push(["PICOUT",  `'${f.picout}'`]);
+      if (f.picin)   fp.push(["PICIN",   `'${f.picin}'`]);
       o.push(fmtMacro(f.name, "DFHMDF", fp));
     }
   }
@@ -267,8 +332,15 @@ function genBMS(ms) {
 /* ═══════════════════════════════════════════════════════════════
    Visual Helpers
    ═══════════════════════════════════════════════════════════════ */
-function fColor(attrs) {
-  if (attrs.includes("DRK")) return { bg: "#1a2a1a", fg: "#3a5a3a" };
+function fColor(f) {
+  const attrs = f.attrs || f; // accept full field or bare attrs array
+  if (attrs.includes("DRK")) return { bg: "#111", fg: "#2a2a2a" };
+  const bmsC = f.color && f.color !== "DEFAULT" ? BMS_COLORS[f.color] : null;
+  if (bmsC) {
+    if (f.hilight === "REVERSE") return { bg: bmsC.fg, fg: bmsC.bg };
+    return bmsC;
+  }
+  // fallback: protection-based
   const u = attrs.includes("UNPROT"), b = attrs.includes("BRT");
   if (u) return b ? { bg: "#0a2e0a", fg: "#55ff55" } : { bg: "#0a2e0a", fg: "#33cc33" };
   return b ? { bg: "#0a1a2e", fg: "#ffffff" } : { bg: "#0a1a2e", fg: "#44ccee" };
@@ -277,7 +349,7 @@ function fColor(attrs) {
 function fText(f) {
   if (f.initial) return f.initial.slice(0, f.length).padEnd(f.length);
   if (f.attrs.includes("UNPROT")) return "_".repeat(f.length);
-  return "\u00B7".repeat(f.length);
+  return "";
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -297,10 +369,12 @@ function BMSEditor() {
   const [showExp, setShowExp] = useState(false);
   const [impTxt, setImpTxt] = useState("");
   const [showMs, setShowMs] = useState(false);
+  const [placingType, setPlacingType] = useState(null);
   const gridRef = useRef(null);
   const modeRef = useRef(mode);
   const dragRef = useRef({ start: null, delta: { dx: 0, dy: 0 } });
   const rbRef = useRef(null);
+  const placeTemplateRef = useRef(null);
   modeRef.current = mode;
 
   // ── Undo / Redo ──
@@ -310,7 +384,8 @@ function BMSEditor() {
 
   const pushMs = useCallback((fnOrVal) => {
     setMapset(prev => {
-      const next = typeof fnOrVal === "function" ? fnOrVal(prev) : fnOrVal;
+      const raw  = typeof fnOrVal === "function" ? fnOrVal(prev) : fnOrVal;
+      const next = autoRenumber(raw);
       if (JSON.stringify(prev) === JSON.stringify(next)) return prev; // no-op
       histRef.current = [...histRef.current.slice(-(MAX_HIST - 1)), JSON.stringify(prev)];
       futRef.current = [];
@@ -450,13 +525,18 @@ function BMSEditor() {
     const rect = gridRef.current.getBoundingClientRect();
     const col = Math.floor((e.clientX - rect.left) / CELL_W) + 1;
     const row = Math.floor((e.clientY - rect.top) / CELL_H) + 1;
+    const tpl = placeTemplateRef.current || {};
     const nf = {
-      id: gid(), name: "", row: clamp(row, 1, ROWS), col: clamp(col, 1, COLS - 9),
-      length: 10, attrs: ["UNPROT", "NORM"], initial: "", picout: "", picin: "",
+      id: gid(), name: tpl.name ?? "", row: clamp(row, 1, ROWS), col: clamp(col, 1, COLS - 9),
+      length: tpl.length ?? 10, attrs: tpl.attrs ?? ["UNPROT", "NORM"],
+      color: tpl.color ?? "DEFAULT", hilight: tpl.hilight ?? "OFF", case: tpl.case ?? "UPPER",
+      initial: tpl.initial ?? "", picout: "", picin: "",
     };
     updFields(fs => fs.push(nf));
     setSelIds(new Set([nf.id]));
     setMode("idle");
+    placeTemplateRef.current = null;
+    setPlacingType(null);
   }, [updFields]);
 
   /* ── Keyboard ── */
@@ -472,6 +552,22 @@ function BMSEditor() {
         e.preventDefault(); redo(); return;
       }
       if (showImp || showExp || showMs) return;
+      if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.key) && selIds.size && !editId) {
+        e.preventDefault();
+        const dr = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
+        const dc = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
+        updFields(fs => {
+          const sel = fs.filter(f => selIds.has(f.id));
+          const minR = Math.min(...sel.map(f => f.row));
+          const maxR = Math.max(...sel.map(f => f.row));
+          const minC = Math.min(...sel.map(f => f.col));
+          const maxC = Math.max(...sel.map(f => f.col + (f.length || 1) - 1));
+          if (minR + dr < 1 || maxR + dr > 24) return;
+          if (minC + dc < 1 || maxC + dc > 80) return;
+          sel.forEach(f => { f.row += dr; f.col += dc; });
+        });
+        return;
+      }
       if ((e.key === "Delete" || e.key === "Backspace") && selIds.size && !editId) {
         updFields(fs => { for (let i = fs.length - 1; i >= 0; i--) if (selIds.has(fs[i].id)) fs.splice(i, 1); });
         setSelIds(new Set());
@@ -483,7 +579,7 @@ function BMSEditor() {
         if (f) { setEditId(id); setEditTxt(f.initial); }
       }
       if (e.key === "Escape") {
-        if (modeRef.current === "placing") setMode("idle");
+        if (modeRef.current === "placing") { setMode("idle"); placeTemplateRef.current = null; setPlacingType(null); }
         if (editId) { setEditId(null); setEditTxt(""); }
       }
       if (e.key === "a" && (e.ctrlKey || e.metaKey) && !editId) {
@@ -535,10 +631,22 @@ function BMSEditor() {
         <button className={bD} onClick={()=>setShowImp(true)}>Importar</button>
         <button className={bD} onClick={()=>setShowExp(true)}>Exportar</button>
         <div className="h-5 w-px bg-zinc-700 mx-1"/>
-        <button className={bP} onClick={()=>setMode(mode==="placing"?"idle":"placing")}
-          style={mode==="placing"?{boxShadow:"0 0 8px #34d399"}:{}}>
-          {mode==="placing"?"✦ Clique no grid...":"+ Campo"}
-        </button>
+        {mode==="placing"
+          ? <span className="flex items-center gap-2 text-emerald-400 text-xs px-1">
+              <span style={{animation:"bms-blink 1s step-end infinite"}}>✦</span>
+              {`Clique para + ${placingType||"campo"}...`}
+              <button className="text-zinc-400 hover:text-zinc-200 ml-1"
+                onClick={()=>{setMode("idle");placeTemplateRef.current=null;setPlacingType(null)}}>✕</button>
+            </span>
+          : <>
+              <button className={bD} title="Texto fixo — ASKIP+NORM, COLOR=TURQUOISE"
+                onClick={()=>{placeTemplateRef.current={name:"",attrs:["ASKIP","NORM"],color:"TURQUOISE",hilight:"OFF",case:"UPPER",initial:"LABEL",length:5};setPlacingType("label");setMode("placing")}}>+ Label</button>
+              <button className={bD} title="Campo de saída — ASKIP+NORM, nomeado"
+                onClick={()=>{placeTemplateRef.current={name:"",attrs:["ASKIP","NORM"],color:"DEFAULT",hilight:"OFF",case:"MIXED",initial:"",length:10};setPlacingType("saída");setMode("placing")}}>+ Saída</button>
+              <button className={bP} title="Campo de entrada — UNPROT+FSET, HILIGHT=UNDERLINE"
+                onClick={()=>{placeTemplateRef.current={name:"",attrs:["UNPROT","FSET"],color:"NEUTRAL",hilight:"UNDERLINE",case:"MIXED",initial:"",length:10};setPlacingType("entrada");setMode("placing")}}>+ Entrada</button>
+            </>
+        }
         <button className={bX} disabled={!selIds.size}
           onClick={()=>{updFields(fs=>{for(let i=fs.length-1;i>=0;i--)if(selIds.has(fs[i].id))fs.splice(i,1)});setSelIds(new Set())}}>
           Excluir
@@ -578,7 +686,8 @@ function BMSEditor() {
                 const sel = selIds.has(f.id);
                 const dx = mode==="dragging"&&sel?Math.round(dragDelta.dx/CELL_W)*CELL_W:0;
                 const dy = mode==="dragging"&&sel?Math.round(dragDelta.dy/CELL_H)*CELL_H:0;
-                const c = fColor(f.attrs);
+                const c = fColor(f);
+                const blinkStyle = f.hilight==="BLINK" ? {animation:"bms-blink 1s step-end infinite"} : {};
                 return (
                   <div key={f.id} className={`absolute flex items-center ${editId===f.id&&!f.attrs.includes("UNPROT")?"overflow-visible":"overflow-hidden"}`}
                     style={{left:(f.col-1)*CELL_W+dx,top:(f.row-1)*CELL_H+dy,
@@ -588,11 +697,15 @@ function BMSEditor() {
                       border:sel?"1.5px solid #fbbf24":"1px solid rgba(255,255,255,0.06)",
                       boxShadow:sel?"0 0 6px rgba(251,191,36,0.3)":"none",
                       zIndex:editId===f.id?20:(sel?10:1),cursor:mode==="placing"?"crosshair":"move",
-                      transition:mode==="dragging"?"none":"border-color 0.15s"}}
+                      transition:mode==="dragging"?"none":"border-color 0.15s",
+                      ...blinkStyle}}
                     onDoubleClick={(e)=>{e.stopPropagation();setSelIds(new Set([f.id]));setEditId(f.id);setEditTxt(f.initial)}}>
 
                     <div style={{position:"absolute",left:-3,top:2,bottom:2,width:3,borderRadius:"1px 0 0 1px",
                       backgroundColor:f.attrs.includes("UNPROT")?"#33cc33":"#44ccee",opacity:.6}}/>
+                    {f.hilight==="UNDERLINE"&&(
+                      <div style={{position:"absolute",bottom:1,left:0,right:0,height:1,backgroundColor:c.fg,opacity:.7,pointerEvents:"none"}}/>
+                    )}
 
                     {editId===f.id?(
                       <input autoFocus value={editTxt} onChange={e=>setEditTxt(e.target.value)}
@@ -639,24 +752,27 @@ function BMSEditor() {
             if(!f) return <span className="text-zinc-600">—</span>;
             return (
               <div className="flex flex-col gap-2">
-                <PR l="Nome" v={f.name} o={v=>updField(f.id,{name:v.toUpperCase().replace(/[^A-Z0-9@#$]/g,"").slice(0,8)})}/>
-                <PR l="Linha" v={f.row} t="number" o={v=>updField(f.id,{row:clamp(+v||1,1,ROWS)})}/>
-                <PR l="Coluna" v={f.col} t="number" o={v=>updField(f.id,{col:clamp(+v||1,1,COLS)})}/>
-                <PR l="Tam" v={f.length} t="number" o={v=>updField(f.id,{length:clamp(+v||1,1,COLS-f.col+1)})}/>
-                <PR l="Inicial" v={f.initial} o={v=>{
+                <PR l="Nome"   tip={TIPS.nome}   v={f.name} o={v=>updField(f.id,{name:v.toUpperCase().replace(/[^A-Z0-9@#$]/g,"").slice(0,8)})}/>
+                <PR l="Linha"  tip={TIPS.linha}  v={f.row}    t="number" o={v=>updField(f.id,{row:clamp(+v||1,1,ROWS)})}/>
+                <PR l="Coluna" tip={TIPS.coluna} v={f.col}    t="number" o={v=>updField(f.id,{col:clamp(+v||1,1,COLS)})}/>
+                <PR l="Tam"    tip={TIPS.tam}    v={f.length} t="number" o={v=>updField(f.id,{length:clamp(+v||1,1,COLS-f.col+1)})}/>
+                <PR l="Inicial" tip={TIPS.inicial} v={f.initial} o={v=>{
                   const upd = {initial:v};
                   if(!f.attrs.includes("UNPROT")&&v.length>0) upd.length=v.length;
                   updField(f.id,upd);
                 }}/>
-                <PR l="PICOUT" v={f.picout} o={v=>updField(f.id,{picout:v})}/>
-                <PR l="PICIN" v={f.picin} o={v=>updField(f.id,{picin:v})}/>
+                <PR l="PICOUT" tip={TIPS.picout} v={f.picout} o={v=>updField(f.id,{picout:v})}/>
+                <PR l="PICIN"  tip={TIPS.picin}  v={f.picin}  o={v=>updField(f.id,{picin:v})}/>
+                <PS l="COLOR"  tip={TIPS.color}  v={f.color||"DEFAULT"} opts={COLOR_OPTS}   o={v=>updField(f.id,{color:v})}/>
+                <PS l="HILIGHT" tip={TIPS.hilight} v={f.hilight||"OFF"} opts={HILIGHT_OPTS} o={v=>updField(f.id,{hilight:v})}/>
+                <PS l="CASE"   tip={TIPS.case}   v={f.case||"UPPER"}   opts={CASE_OPTS}    o={v=>updField(f.id,{case:v})}/>
                 <div className="mt-1">
                   {Object.entries(ATTR_G).map(([gn,ga])=>(
                     <div key={gn}>
                       <div className="text-zinc-500 mb-1 mt-2 capitalize">{gn}</div>
                       <div className="flex flex-wrap gap-1">
                         {ga.map(a=>(
-                          <AT key={a} l={a} on={f.attrs.includes(a)} k={()=>{
+                          <AT key={a} l={a} tip={TIPS[a]} on={f.attrs.includes(a)} k={()=>{
                             if(gn==="flags"){
                               updField(f.id,{attrs:f.attrs.includes(a)?f.attrs.filter(x=>x!==a):[...f.attrs,a]});
                             } else {
@@ -678,6 +794,7 @@ function BMSEditor() {
                 <div>Ctrl+Clique = multi</div>
                 <div>Arrastar vazio = caixa</div>
                 <div>Duplo-clique / F2 = editar texto</div>
+                <div>Setas = mover seleção</div>
                 <div>Delete = excluir</div>
                 <div>Ctrl+A = tudo</div>
                 <div>Ctrl+Z = desfazer</div>
@@ -691,16 +808,16 @@ function BMSEditor() {
       {/* Status */}
       <div className="flex items-center px-3 py-1 bg-zinc-900 border-t border-zinc-700 text-xs text-zinc-500 gap-4">
         <span>80×24</span>
-        {mode==="placing"&&<span className="text-emerald-400">● Posicionamento</span>}
+        {mode==="placing"&&<span className="text-emerald-400">● {placingType ? `Posicionando ${placingType}` : "Posicionamento"}</span>}
         {mode==="dragging"&&<span className="text-amber-400">● Arrastando</span>}
         <div className="flex-1"/>
         {mapset.timestamp&&<span className="text-zinc-500">TIMESTAMP: <span className="text-zinc-400">{mapset.timestamp}</span></span>}
       </div>
 
       {/* Modals */}
-      {showImp&&<Mdl t="Importar BMS" x={()=>setShowImp(false)}>
+      {showImp&&<Mdl t="Importar BMS" sz="max-w-2xl" x={()=>setShowImp(false)}>
         <textarea className="w-full h-64 bg-zinc-950 text-emerald-300 border border-zinc-700 rounded p-2 text-xs resize-none"
-          style={mono} placeholder="Cole o fonte BMS aqui..." value={impTxt} onChange={e=>setImpTxt(e.target.value)}/>
+          style={{...mono,whiteSpace:"pre",overflowWrap:"normal",overflowX:"auto"}} placeholder="Cole o fonte BMS aqui..." value={impTxt} onChange={e=>setImpTxt(e.target.value)}/>
         <div className="flex gap-2 mt-3">
           <button className={bP} onClick={doImport}>Importar</button>
           <button className={bD} onClick={()=>setImpTxt(SAMPLE)}>Exemplo</button>
@@ -708,14 +825,7 @@ function BMSEditor() {
         </div>
       </Mdl>}
 
-      {showExp&&<Mdl t="Exportar BMS" x={()=>setShowExp(false)}>
-        <textarea className="w-full h-64 bg-zinc-950 text-emerald-300 border border-zinc-700 rounded p-2 text-xs resize-none"
-          style={mono} readOnly value={genBMS(mapset)}/>
-        <div className="flex gap-2 mt-3">
-          <button className={bP} onClick={()=>navigator.clipboard?.writeText(genBMS(mapset))}>Copiar</button>
-          <button className={bD} onClick={()=>setShowExp(false)}>Fechar</button>
-        </div>
-      </Mdl>}
+      {showExp&&<ExpMdl mapset={mapset} bP={bP} bD={bD} mono={mono} x={()=>setShowExp(false)}/>}
 
       {showMs&&<Mdl t="Mapset" x={()=>setShowMs(false)}>
         <div className="grid grid-cols-2 gap-2 text-xs">
@@ -740,10 +850,59 @@ function BMSEditor() {
 /* ═══════════════════════════════════════════════════════════════
    Small UI Components
    ═══════════════════════════════════════════════════════════════ */
-function Mdl({t,children,x}){
+function Tip({ text }) {
+  const [rect, setRect] = React.useState(null);
+  const ref = React.useRef(null);
+  return (
+    <span className="inline-flex items-center ml-0.5"
+          onMouseEnter={()=>setRect(ref.current?.getBoundingClientRect())}
+          onMouseLeave={()=>setRect(null)}>
+      <span ref={ref} className="text-zinc-700 hover:text-zinc-400 cursor-help select-none leading-none" style={{fontSize:10}}>ⓘ</span>
+      {rect&&ReactDOM.createPortal(
+        <span style={{position:"fixed",zIndex:9999,pointerEvents:"none",
+                      top:rect.top-6,transform:"translateY(-100%)",
+                      left:Math.max(8,rect.right-218),width:210,
+                      background:"#18181b",border:"1px solid #3f3f46",borderRadius:5,
+                      padding:"7px 10px",fontSize:11,lineHeight:1.6,color:"#d4d4d8",
+                      boxShadow:"0 6px 20px rgba(0,0,0,.75)",whiteSpace:"pre-wrap",fontFamily:"inherit"}}>
+          {text}
+        </span>,
+        document.body
+      )}
+    </span>
+  );
+}
+
+function ExpMdl({mapset,bP,bD,mono,x}){
+  const [copied, setCopied] = useState(false);
+  const doCopy = () => {
+    const txt = genBMS(mapset);
+    navigator.clipboard?.writeText(txt).then(()=>{
+      setCopied(true);
+      setTimeout(()=>setCopied(false), 2000);
+    });
+  };
+  return(
+    <Mdl t="Exportar BMS" sz="max-w-2xl" x={x}>
+      <textarea className="w-full h-64 bg-zinc-950 text-emerald-300 border border-zinc-700 rounded p-2 text-xs resize-none"
+        style={{...mono,whiteSpace:"pre",overflowWrap:"normal",overflowX:"auto"}} readOnly value={genBMS(mapset)}/>
+      <div className="flex items-center gap-2 mt-3">
+        <button className={copied
+          ? "px-3 py-1.5 text-xs rounded border bg-emerald-700 text-emerald-100 border-emerald-500 transition-colors"
+          : bP}
+          onClick={doCopy}>
+          {copied ? "✓ Copiado!" : "Copiar"}
+        </button>
+        <button className={bD} onClick={x}>Fechar</button>
+      </div>
+    </Mdl>
+  );
+}
+
+function Mdl({t,children,x,sz="max-w-lg"}){
   return(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={x}>
-      <div className="bg-zinc-900 border border-zinc-600 rounded-lg p-5 w-full max-w-lg shadow-2xl"
+      <div className={`bg-zinc-900 border border-zinc-600 rounded-lg p-5 w-full ${sz} shadow-2xl`}
         style={{fontFamily:"'IBM Plex Mono',monospace"}} onClick={e=>e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <span className="text-emerald-400 font-bold text-sm tracking-wider">{t}</span>
@@ -755,19 +914,35 @@ function Mdl({t,children,x}){
   );
 }
 
-function PR({l,v,o,t="text"}){
+function PR({l,v,o,t="text",tip}){
   return(
     <div className="flex items-center gap-2">
-      <label className="text-zinc-500 w-14 text-right flex-shrink-0 text-xs">{l}</label>
+      <label className="text-zinc-500 w-14 text-right flex-shrink-0 text-xs flex items-center justify-end">
+        {l}{tip&&<Tip text={tip}/>}
+      </label>
       <input type={t} className="flex-1 bg-zinc-950 border border-zinc-700 rounded px-2 py-0.5 text-zinc-200 text-xs min-w-0"
         style={{fontFamily:"inherit"}} value={v} onChange={e=>o(e.target.value)}/>
     </div>
   );
 }
 
-function AT({l,on,k}){
+function PS({l,v,opts,o,tip}){
   return(
-    <button onClick={k} className={`px-2 py-0.5 rounded text-xs transition-colors ${
+    <div className="flex items-center gap-2">
+      <label className="text-zinc-500 w-14 text-right flex-shrink-0 text-xs flex items-center justify-end">
+        {l}{tip&&<Tip text={tip}/>}
+      </label>
+      <select className="flex-1 bg-zinc-950 border border-zinc-700 rounded px-2 py-0.5 text-zinc-200 text-xs min-w-0"
+        style={{fontFamily:"inherit"}} value={v} onChange={e=>o(e.target.value)}>
+        {opts.map(op=><option key={op} value={op}>{op}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function AT({l,on,k,tip}){
+  return(
+    <button title={tip} onClick={k} className={`px-2 py-0.5 rounded text-xs transition-colors ${
       on?"bg-emerald-800 text-emerald-200 border border-emerald-500":"bg-zinc-800 text-zinc-500 border border-zinc-700 hover:border-zinc-500"
     }`}>{l}</button>
   );
