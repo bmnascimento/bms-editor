@@ -86,47 +86,32 @@ const BMS_COLORS = {
   WHITE:     { bg: "#101010", fg: "#e0e0e0" },
 };
 
-const SAMPLE = `DEMOSET  DFHMSD TYPE=&SYSPARM,                                        X
-               MODE=INOUT,                                            X
-               LANG=COBOL,                                            X
-               CTRL=FREEKB,                                           X
-               STORAGE=AUTO,                                          X
-               TIOAPFX=YES
-DEMOMAP  DFHMDI SIZE=(24,80),                                         X
-               LINE=1,                                                X
-               COLUMN=1
-TITLE    DFHMDF POS=(1,25),                                           X
-               LENGTH=30,                                             X
-               ATTRB=(ASKIP,BRT),                                     X
-               INITIAL='SISTEMA DE EXEMPLO'
-LBLNOM   DFHMDF POS=(4,2),                                            X
-               LENGTH=12,                                             X
-               ATTRB=(ASKIP,NORM),                                    X
-               INITIAL='NOME......:'
-INPNOM   DFHMDF POS=(4,15),                                           X
-               LENGTH=40,                                             X
-               ATTRB=(UNPROT,IC,FSET)
-LBLCPF   DFHMDF POS=(6,2),                                            X
-               LENGTH=12,                                             X
-               ATTRB=(ASKIP,NORM),                                    X
-               INITIAL='CPF.......:'
-INPCPF   DFHMDF POS=(6,15),                                           X
-               LENGTH=14,                                             X
-               ATTRB=(UNPROT,NUM)
-LBLEND   DFHMDF POS=(8,2),                                            X
-               LENGTH=12,                                             X
-               ATTRB=(ASKIP,NORM),                                    X
-               INITIAL='ENDERECO..:'
-INPEND   DFHMDF POS=(8,15),                                           X
-               LENGTH=50,                                             X
-               ATTRB=(UNPROT,FSET)
-MSG      DFHMDF POS=(22,2),                                           X
-               LENGTH=76,                                             X
-               ATTRB=(ASKIP,BRT)
-CMDLINE  DFHMDF POS=(24,2),                                           X
-               LENGTH=76,                                             X
-               ATTRB=(UNPROT,IC)
-         DFHMSD TYPE=FINAL
+const SAMPLE = `SIS0000  DFHMSD TYPE=&SYSPARM,TIOAPFX=NO
+SIS0000  DFHMDI SIZE=(24,80),COLOR=BLUE,EXTATT=YES
+CAMPO001 DFHMDF POS=(01,02),ATTRB=(PROT,FSET,NORM),COLOR=GREEN,        C
+               LENGTH=008,HILIGHT=UNDERLINE,CASE=MIXED,                C
+               INITIAL='SIS0.000'
+         DFHMDF POS=(01,32),ATTRB=(ASKIP,NORM),COLOR=TURQUOISE,        C
+               LENGTH=009,HILIGHT=OFF,INITIAL='EMPRESA X'
+CAMPO002 DFHMDF POS=(01,62),ATTRB=(ASKIP,NORM),COLOR=DEFAULT,          C
+               LENGTH=018,HILIGHT=OFF,CASE=MIXED
+         DFHMDF POS=(06,03),ATTRB=(ASKIP,NORM),COLOR=TURQUOISE,        C
+               LENGTH=012,HILIGHT=OFF,INITIAL='NOME......:'
+         DFHMDF POS=(06,16),ATTRB=(FSET,UNPROT),COLOR=NEUTRAL,         C
+               LENGTH=040,HILIGHT=UNDERLINE
+         DFHMDF POS=(08,03),ATTRB=(ASKIP,NORM),COLOR=TURQUOISE,        C
+               LENGTH=011,HILIGHT=OFF,INITIAL='CPF.......:'
+         DFHMDF POS=(08,16),ATTRB=(FSET,UNPROT),COLOR=NEUTRAL,         C
+               LENGTH=011,HILIGHT=UNDERLINE
+         DFHMDF POS=(10,03),ATTRB=(ASKIP,NORM),COLOR=TURQUOISE,        C
+               LENGTH=011,HILIGHT=OFF,INITIAL='ENDERECO..:'
+         DFHMDF POS=(10,16),ATTRB=(FSET,UNPROT),COLOR=NEUTRAL,         C
+               LENGTH=040,HILIGHT=UNDERLINE
+         DFHMDF POS=(21,61),ATTRB=(ASKIP,NORM),COLOR=TURQUOISE,        C
+               LENGTH=009,HILIGHT=OFF,INITIAL='CONFIRMA?'
+         DFHMDF POS=(21,71),ATTRB=(FSET,UNPROT),COLOR=NEUTRAL,         C
+               LENGTH=001,HILIGHT=UNDERLINE
+SIS0000  DFHMSD TYPE=FINAL
          END`;
 
 /* ═══════════════════════════════════════════════════════════════
@@ -168,7 +153,7 @@ function joinCont(lines) {
       current = clean;
     } else if (current !== null) {
       // Continuation — strip leading whitespace and append
-      current += clean.replace(/^\s+/, "");
+      current += clean.length >= 16 ? clean.slice(15) : clean.replace(/^\s+/, "");
     }
   }
   if (current !== null) result.push(current);
