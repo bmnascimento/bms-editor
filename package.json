@@ -1,0 +1,7 @@
+{
+  "name": "bms-editor",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  }
+}

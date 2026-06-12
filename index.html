@@ -44,6 +44,49 @@ const gid = (usedIds) => {
 };
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const isFormControl = el => ["INPUT","SELECT","TEXTAREA"].includes(el?.tagName) || el?.isContentEditable;
+const validateSymbol = value => value === "" || /^[A-Z@#$][A-Z0-9@#$]{0,7}$/i.test(value);
+const sanitizeSymbol = value => {
+  const clean = value.toUpperCase().replace(/[^A-Z0-9@#$]/g, "").replace(/^[0-9]+/, "");
+  return clean.slice(0, 8);
+};
+const normalizeField = field => {
+  const n = { ...field };
+  n.row = clamp(Number(n.row) || 1, 1, ROWS);
+  n.col = clamp(Number(n.col) || 1, 1, COLS);
+  n.length = clamp(Number(n.length) || 1, 1, COLS - n.col + 1);
+  if (typeof n.initial === "string") n.initial = n.initial.slice(0, n.length);
+  return n;
+};
+const clampGroupDelta = (fields, dC, dR) => {
+  if (!fields.length) return { dC: 0, dR: 0 };
+  const minR = Math.min(...fields.map(f => f.row));
+  const maxR = Math.max(...fields.map(f => f.row));
+  const minC = Math.min(...fields.map(f => f.col));
+  const maxC = Math.max(...fields.map(f => f.col + f.length - 1));
+  return {
+    dC: clamp(dC, 1 - minC, COLS - maxC),
+    dR: clamp(dR, 1 - minR, ROWS - maxR),
+  };
+};
+const validateMapset = ms => {
+  const errors = [];
+  if (!ms.name || !validateSymbol(ms.name)) errors.push("Nome do mapset inválido.");
+  const mapNames = new Set();
+  for (const map of ms.maps || []) {
+    if (!map.name || !validateSymbol(map.name)) errors.push(`Nome de mapa inválido: ${map.name || "(vazio)"}.`);
+    const mapKey = map.name?.toUpperCase();
+    if (mapNames.has(mapKey)) errors.push(`Nome de mapa duplicado: ${map.name}.`);
+    mapNames.add(mapKey);
+    const fieldNames = new Set();
+    for (const field of map.fields || []) {
+      if (field.name && !validateSymbol(field.name)) errors.push(`Nome de campo inválido: ${field.name}.`);
+      const fieldKey = field.name?.toUpperCase();
+      if (field.name && fieldNames.has(fieldKey)) errors.push(`Nome de campo duplicado em ${map.name}: ${field.name}.`);
+      if (field.name) fieldNames.add(fieldKey);
+    }
+  }
+  return errors;
+};
 
 const ATTR_G = {
   protection: ["ASKIP", "PROT", "UNPROT"],
@@ -154,7 +197,7 @@ function joinCont(lines) {
     const clean = cleanLine(l);
 
     // New statement? (line contains a DFHM macro keyword)
-    if (/\bDFHM\w+\b/.test(clean)) {
+    if (/\bDFHM\w+\b/i.test(clean)) {
       if (current !== null) result.push(current);
       current = clean;
     } else if (current !== null) {
@@ -168,7 +211,9 @@ function joinCont(lines) {
 
 function parseP(s) {
   const p = {}; let d = 0, q = false, t = ""; const ts = [];
-  for (const c of s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "'" && q && s[i + 1] === "'") { t += "''"; i++; continue; }
     if (c === "'" && d === 0) { q = !q; t += c; continue; }
     if (q) { t += c; continue; }
     if (c === "(") d++;
@@ -182,11 +227,13 @@ function parseP(s) {
     if (eq === -1) continue;
     const k = tk.slice(0, eq).trim().toUpperCase();
     let v = tk.slice(eq + 1).trim();
-    if (v.startsWith("'") && v.endsWith("'")) v = v.slice(1, -1);
+    if (v.startsWith("'") && v.endsWith("'")) v = v.slice(1, -1).replace(/''/g, "'");
     p[k] = v;
   }
   return p;
 }
+
+const extraPairs = (p, known) => Object.entries(p).filter(([key]) => !known.includes(key));
 
 function parsePos(s) {
   const m = s && s.match(/\((\d+)\s*,\s*(\d+)\)/);
@@ -200,7 +247,7 @@ function parseAttr(s) {
 
 function parseTimestamp(src) {
   for (const line of src.split("\n")) {
-    const m = line.match(/^\*\s*TIMESTAMP\s*=\s*(\d{12,14})/);
+    const m = line.match(/^\*\s*TIMESTAMP\s*=\s*(\d{14})(?!\d)/);
     if (m) {
       const d = m[1];
       // Format: HHMMSSYYYYMMDD (14 digits)
@@ -215,15 +262,18 @@ function parseTimestamp(src) {
 function parseBMS(src) {
   const stmts = joinCont(src.split("\n"));
   const ts = parseTimestamp(src);
-  const ms = { name: "MAPSET", type: "", mode: "", lang: "", ctrl: "", storage: "", tioapfx: "", data: "", maps: [], timestamp: ts?.display || null, timestampRaw: ts?.raw || null };
+  const ms = { name: "MAPSET", type: "", mode: "", lang: "", ctrl: "", storage: "", tioapfx: "", data: "", extra: [], maps: [], timestamp: ts?.display || null, timestampRaw: ts?.raw || null };
+  let foundMapset = false;
   let cur = null;
   for (const st of stmts) {
-    const m = st.match(/^(\S+)?\s+(DFHM\w+)\s*(.*)/);
+    const m = st.match(/^(\S+)?\s+(DFHM\w+)\s*(.*)/i);
     if (!m) continue;
-    const [, label, macro, rest] = m;
+    const [, label, rawMacro, rest] = m;
+    const macro = rawMacro.toUpperCase();
     const p = parseP(rest || "");
     if (macro === "DFHMSD") {
       if ((p.TYPE || "").toUpperCase() === "FINAL") continue;
+      foundMapset = true;
       if (label) ms.name = label;
       if (p.TYPE) ms.type = p.TYPE;
       if (p.MODE) ms.mode = p.MODE;
@@ -232,13 +282,15 @@ function parseBMS(src) {
       if (p.STORAGE) ms.storage = p.STORAGE;
       if (p.TIOAPFX) ms.tioapfx = p.TIOAPFX;
       if (p.DATA)    ms.data    = p.DATA;
+      ms.extra = extraPairs(p, ["TYPE","MODE","LANG","CTRL","STORAGE","TIOAPFX","DATA"]);
     } else if (macro === "DFHMDI") {
       cur = { name: label || "MAP01", color: p.COLOR || "BLUE", extatt: p.EXTATT || "YES",
-              size: p.SIZE || "", line: p.LINE || "", column: p.COLUMN || "", fields: [] };
+              size: p.SIZE || "", line: p.LINE || "", column: p.COLUMN || "",
+              extra: extraPairs(p, ["SIZE","LINE","COLUMN","COLOR","EXTATT"]), fields: [] };
       ms.maps.push(cur);
     } else if (macro === "DFHMDF" && cur) {
       const pos = parsePos(p.POS);
-      cur.fields.push({
+      cur.fields.push(normalizeField({
         id: gid(), name: label || "",
         row: pos.row, col: pos.col,
         length: parseInt(p.LENGTH) || 1,
@@ -250,10 +302,13 @@ function parseBMS(src) {
         case:   (p.CASE   || "UPPER").toUpperCase(),
         justify: p.JUSTIFY || "",
         validn:  p.VALIDN  || "",
-      });
+        extra: extraPairs(p, ["POS","ATTRB","COLOR","LENGTH","HILIGHT","CASE","INITIAL","PICOUT","PICIN","JUSTIFY","VALIDN"]),
+      }));
     }
   }
-  if (!ms.maps.length) ms.maps.push({ name: "MAP01", color: "BLUE", extatt: "YES", size: "", line: "", column: "", fields: [] });
+  if (!foundMapset || !ms.maps.length) throw new Error("Fonte BMS inválido: informe um DFHMSD e ao menos um DFHMDI.");
+  const errors = validateMapset(ms);
+  if (errors.length) throw new Error(errors.join("\n"));
   return ms;
 }
 
@@ -284,6 +339,7 @@ function fmtMacro(label, macro, pairs) {
 
 const p2 = n => String(n).padStart(2, "0");
 const p3 = n => String(n).padStart(3, "0");
+const quoteBMS = value => `'${String(value).replace(/'/g, "''")}'`;
 
 function autoRenumber(ms) {
   const n = JSON.parse(JSON.stringify(ms));
@@ -297,6 +353,8 @@ function autoRenumber(ms) {
 }
 
 function genBMS(ms) {
+  const errors = validateMapset(ms);
+  if (errors.length) throw new Error(errors.join("\n"));
   const o = [];
   if (ms.timestampRaw) o.push(`*   TIMESTAMP=${ms.timestampRaw}`);
   const sdPairs = [["TYPE", ms.type || "&SYSPARM"]];
@@ -306,6 +364,7 @@ function genBMS(ms) {
   if (ms.storage) sdPairs.push(["STORAGE", ms.storage]);
   if (ms.tioapfx) sdPairs.push(["TIOAPFX", ms.tioapfx]);
   if (ms.data)    sdPairs.push(["DATA",    ms.data]);
+  sdPairs.push(...(ms.extra || []));
   o.push(fmtMacro(ms.name, "DFHMSD", sdPairs));
   for (const map of ms.maps) {
     const diPairs = [["SIZE", map.size || "(24,80)"]];
@@ -313,6 +372,7 @@ function genBMS(ms) {
     if (map.column) diPairs.push(["COLUMN", map.column]);
     diPairs.push(["COLOR", map.color || "BLUE"]);
     diPairs.push(["EXTATT", map.extatt || "YES"]);
+    diPairs.push(...(map.extra || []));
     o.push(fmtMacro(map.name, "DFHMDI", diPairs));
     const sorted = [...map.fields].sort((a, b) => a.row - b.row || a.col - b.col);
     for (const f of sorted) {
@@ -324,11 +384,12 @@ function genBMS(ms) {
         ["HILIGHT",f.hilight|| "OFF"],
       ];
       if (f.case && f.case !== "UPPER") fp.push(["CASE", f.case]);
-      if (f.initial) fp.push(["INITIAL", `'${f.initial}'`]);
-      if (f.picout)  fp.push(["PICOUT",  `'${f.picout}'`]);
-      if (f.picin)   fp.push(["PICIN",   `'${f.picin}'`]);
+      if (f.initial) fp.push(["INITIAL", quoteBMS(f.initial)]);
+      if (f.picout)  fp.push(["PICOUT",  quoteBMS(f.picout)]);
+      if (f.picin)   fp.push(["PICIN",   quoteBMS(f.picin)]);
       if (f.justify) fp.push(["JUSTIFY", f.justify]);
       if (f.validn)  fp.push(["VALIDN",  f.validn]);
+      fp.push(...(f.extra || []));
       o.push(fmtMacro(f.name, "DFHMDF", fp));
     }
   }
@@ -365,7 +426,7 @@ function fText(f) {
    ═══════════════════════════════════════════════════════════════ */
 function BMSEditor() {
   const [mapset, setMapset] = useState(() => parseBMS(SAMPLE));
-  const [mapIdx] = useState(0);
+  const [mapIdx, setMapIdx] = useState(0);
   const [selIds, setSelIds] = useState(new Set());
   const [mode, setMode] = useState("idle");
   const [dragStart, setDragStart] = useState(null);
@@ -426,6 +487,10 @@ function BMSEditor() {
 
   const fields = mapset.maps[mapIdx]?.fields || [];
 
+  useEffect(() => {
+    if (mapIdx >= mapset.maps.length) setMapIdx(Math.max(0, mapset.maps.length - 1));
+  }, [mapIdx, mapset.maps.length]);
+
   // Undo/import can replace the field list while an interaction still holds old ids.
   useEffect(() => {
     const validIds = new Set(fields.map(f => f.id));
@@ -449,7 +514,10 @@ function BMSEditor() {
   }, [mapIdx, pushMs]);
 
   const updField = useCallback((id, u) => {
-    updFields(fs => { const f = fs.find(x => x.id === id); if (f) Object.assign(f, u); });
+    updFields(fs => {
+      const idx = fs.findIndex(x => x.id === id);
+      if (idx >= 0) fs[idx] = normalizeField({ ...fs[idx], ...u });
+    });
   }, [updFields]);
 
   const conflictIds = useMemo(() => {
@@ -510,7 +578,7 @@ function BMSEditor() {
       rbRef.current = { x1: x, y1: y, x2: x, y2: y };
       setRb({ x1: x, y1: y, x2: x, y2: y });
     }
-  }, [findAt, selIds]);
+  }, [findAt, selIds, editId]);
 
   /* ── Window-level move/up for reliable drag ── */
   useEffect(() => {
@@ -535,9 +603,11 @@ function BMSEditor() {
     const onUp = (e) => {
       if (modeRef.current === "dragging") {
         const d = dragRef.current.delta;
-        const dC = Math.round(d.dx / CELL_W), dR = Math.round(d.dy / CELL_H);
+        let dC = Math.round(d.dx / CELL_W), dR = Math.round(d.dy / CELL_H);
         if (dC !== 0 || dR !== 0) {
           const ids = dragRef.current.selIds || selIds;
+          const selectedFields = fields.filter(f => ids.has(f.id));
+          ({ dC, dR } = clampGroupDelta(selectedFields, dC, dR));
           if (e.ctrlKey || e.metaKey) {
             // Copiar: gera novos ids antes para poder selecionar depois
             const idMap = new Map();
@@ -549,9 +619,9 @@ function BMSEditor() {
               const n = JSON.parse(JSON.stringify(ms));
               for (const f of n.maps[mapIdx].fields) {
                 if (ids.has(f.id)) {
-                  n.maps[mapIdx].fields.push({ ...f, id: idMap.get(f.id),
-                    row: clamp(f.row + dR, 1, ROWS),
-                    col: clamp(f.col + dC, 1, COLS - f.length + 1),
+                  n.maps[mapIdx].fields.push({ ...f, id: idMap.get(f.id), name: "",
+                    row: f.row + dR,
+                    col: f.col + dC,
                   });
                 }
               }
@@ -563,8 +633,8 @@ function BMSEditor() {
               const n = JSON.parse(JSON.stringify(ms));
               for (const f of n.maps[mapIdx].fields) {
                 if (ids.has(f.id)) {
-                  f.row = clamp(f.row + dR, 1, ROWS);
-                  f.col = clamp(f.col + dC, 1, COLS - f.length + 1);
+                  f.row += dR;
+                  f.col += dC;
                 }
               }
               return n;
@@ -613,12 +683,12 @@ function BMSEditor() {
     const row = Math.floor((e.clientY - rect.top) / CELL_H) + 1;
     const tpl = placeTemplateRef.current || {};
     const usedIds = new Set(fields.map(f => f.id));
-    const nf = {
-      id: gid(usedIds), name: tpl.name ?? "", row: clamp(row, 1, ROWS), col: clamp(col, 1, COLS - 9),
+    const nf = normalizeField({
+      id: gid(usedIds), name: tpl.name ?? "", row, col,
       length: tpl.length ?? 10, attrs: tpl.attrs ?? ["UNPROT", "NORM"],
       color: tpl.color ?? "DEFAULT", hilight: tpl.hilight ?? "OFF", case: tpl.case ?? "UPPER",
-      initial: tpl.initial ?? "", picout: "", picin: "",
-    };
+      initial: tpl.initial ?? "", picout: "", picin: "", extra: [],
+    });
     updFields(fs => fs.push(nf));
     setSelIds(new Set([nf.id]));
     setMode("idle");
@@ -646,13 +716,8 @@ function BMSEditor() {
         const dc = e.key === "ArrowLeft" ? -1 : e.key === "ArrowRight" ? 1 : 0;
         updFields(fs => {
           const sel = fs.filter(f => selIds.has(f.id));
-          const minR = Math.min(...sel.map(f => f.row));
-          const maxR = Math.max(...sel.map(f => f.row));
-          const minC = Math.min(...sel.map(f => f.col));
-          const maxC = Math.max(...sel.map(f => f.col + (f.length || 1) - 1));
-          if (minR + dr < 1 || maxR + dr > 24) return;
-          if (minC + dc < 1 || maxC + dc > 80) return;
-          sel.forEach(f => { f.row += dr; f.col += dc; });
+          const delta = clampGroupDelta(sel, dc, dr);
+          sel.forEach(f => { f.row += delta.dR; f.col += delta.dC; });
         });
         return;
       }
@@ -748,6 +813,12 @@ function BMSEditor() {
           Excluir
         </button>
         <button className={bD} onClick={()=>setShowMs(true)}>Mapset</button>
+        {mapset.maps.length>1&&(
+          <select className="bg-zinc-800 border border-zinc-600 rounded px-2 py-1.5 text-xs text-zinc-200"
+            value={mapIdx} onChange={e=>{setMapIdx(+e.target.value);setSelIds(new Set());setEditId(null)}}>
+            {mapset.maps.map((map,i)=><option key={i} value={i}>{map.name||`MAP${i+1}`}</option>)}
+          </select>
+        )}
         <div className="flex-1"/>
         <span className="text-zinc-500 text-xs">
           {mapset.name}/{mapset.maps[mapIdx]?.name} · {fields.length} campos
@@ -917,7 +988,10 @@ function BMSEditor() {
             if(!f) return <span className="text-zinc-600">—</span>;
             return (
               <div className="flex flex-col gap-2">
-                <PR l="Nome"   tip={TIPS.nome}   v={f.name} o={v=>updField(f.id,{name:v.toUpperCase().replace(/[^A-Z0-9@#$]/g,"").slice(0,8)})}/>
+                <PR l="Nome"   tip={TIPS.nome}   v={f.name} o={v=>{
+                  const name=sanitizeSymbol(v);
+                  if(!name||!fields.some(x=>x.id!==f.id&&x.name===name)) updField(f.id,{name});
+                }}/>
                 <PR l="Linha"  tip={TIPS.linha}  v={f.row}    t="number" o={v=>updField(f.id,{row:clamp(+v||1,1,ROWS)})}/>
                 <PR l="Coluna" tip={TIPS.coluna} v={f.col}    t="number" o={v=>updField(f.id,{col:clamp(+v||1,1,COLS)})}/>
                 <PR l="Tam"    tip={TIPS.tam}    v={f.length} t="number" o={v=>updField(f.id,{length:clamp(+v||1,1,COLS-f.col+1)})}/>
@@ -1001,7 +1075,7 @@ function BMSEditor() {
             <label key={k} className="contents">
               <span className="text-zinc-400 py-1">{l}</span>
               <input className="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-zinc-200" style={mono}
-                value={mapset[k]||""} onChange={e=>setMapset(ms=>({...ms,[k]:e.target.value}))}/>
+                value={mapset[k]||""} onChange={e=>pushMs(ms=>({...ms,[k]:k==="name"?sanitizeSymbol(e.target.value):e.target.value}))}/>
             </label>
           ))}
         </div>
@@ -1011,8 +1085,11 @@ function BMSEditor() {
             <label key={k} className="contents">
               <span className="text-zinc-400 py-1">{l}</span>
               <input className="bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-zinc-200" style={mono}
-                value={mapset.maps[mapIdx]?.[k]||""} onChange={e=>setMapset(ms=>{
-                  const n=JSON.parse(JSON.stringify(ms));n.maps[mapIdx][k]=e.target.value;return n;})}/>
+                value={mapset.maps[mapIdx]?.[k]||""} onChange={e=>pushMs(ms=>{
+                  const n=JSON.parse(JSON.stringify(ms));
+                  const value=k==="name"?sanitizeSymbol(e.target.value):e.target.value;
+                  if(k!=="name"||!value||!n.maps.some((m,i)=>i!==mapIdx&&m.name===value)) n.maps[mapIdx][k]=value;
+                  return n;})}/>
             </label>
           ))}
         </div>
@@ -1050,9 +1127,13 @@ function Tip({ text }) {
 
 function ExpMdl({mapset,bP,bD,mono,x}){
   const [copied, setCopied] = useState(false);
+  const generated = useMemo(() => {
+    try { return { text: genBMS(mapset), error: "" }; }
+    catch (err) { return { text: "", error: err.message }; }
+  }, [mapset]);
   const doCopy = () => {
-    const txt = genBMS(mapset);
-    navigator.clipboard?.writeText(txt).then(()=>{
+    if (generated.error) return;
+    navigator.clipboard?.writeText(generated.text).then(()=>{
       setCopied(true);
       setTimeout(()=>setCopied(false), 2000);
     });
@@ -1060,12 +1141,13 @@ function ExpMdl({mapset,bP,bD,mono,x}){
   return(
     <Mdl t="Exportar BMS" sz="max-w-2xl" x={x}>
       <textarea className="w-full h-64 bg-zinc-950 text-emerald-300 border border-zinc-700 rounded p-2 text-xs resize-none"
-        style={{...mono,whiteSpace:"pre",overflowWrap:"normal",overflowX:"auto"}} readOnly value={genBMS(mapset)}/>
+        style={{...mono,whiteSpace:"pre",overflowWrap:"normal",overflowX:"auto"}} readOnly
+        value={generated.error?`Erro de validação:\n${generated.error}`:generated.text}/>
       <div className="flex items-center gap-2 mt-3">
         <button className={copied
           ? "px-3 py-1.5 text-xs rounded border bg-emerald-700 text-emerald-100 border-emerald-500 transition-colors"
           : bP}
-          onClick={doCopy}>
+          disabled={!!generated.error} onClick={doCopy}>
           {copied ? "✓ Copiado!" : "Copiar"}
         </button>
         <button className={bD} onClick={x}>Fechar</button>
