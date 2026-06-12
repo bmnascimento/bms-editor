@@ -36,8 +36,14 @@ const CELL_W = 9.6, CELL_H = 20;
 const GRID_W = COLS * CELL_W, GRID_H = ROWS * CELL_H;
 
 let _nid = 1;
-const gid = () => `f${_nid++}`;
+const gid = (usedIds) => {
+  let id;
+  do id = `f${_nid++}`; while (usedIds?.has(id));
+  usedIds?.add(id);
+  return id;
+};
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const isFormControl = el => ["INPUT","SELECT","TEXTAREA"].includes(el?.tagName) || el?.isContentEditable;
 
 const ATTR_G = {
   protection: ["ASKIP", "PROT", "UNPROT"],
@@ -435,6 +441,20 @@ function BMSEditor() {
 
   const fields = mapset.maps[mapIdx]?.fields || [];
 
+  // Undo/import can replace the field list while an interaction still holds old ids.
+  useEffect(() => {
+    const validIds = new Set(fields.map(f => f.id));
+    setSelIds(prev => {
+      const next = new Set([...prev].filter(id => validIds.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+    if (editId && !validIds.has(editId)) {
+      setEditId(null);
+      setEditTxt("");
+      setEditSel({s:0,e:0});
+    }
+  }, [fields, editId]);
+
   const updFields = useCallback((fn) => {
     pushMs(ms => {
       const n = JSON.parse(JSON.stringify(ms));
@@ -536,8 +556,9 @@ function BMSEditor() {
           if (e.ctrlKey || e.metaKey) {
             // Copiar: gera novos ids antes para poder selecionar depois
             const idMap = new Map();
+            const usedIds = new Set(fields.map(f => f.id));
             for (const f of fields) {
-              if (ids.has(f.id)) idMap.set(f.id, gid());
+              if (ids.has(f.id)) idMap.set(f.id, gid(usedIds));
             }
             pushMs(ms => {
               const n = JSON.parse(JSON.stringify(ms));
@@ -606,8 +627,9 @@ function BMSEditor() {
     const col = Math.floor((e.clientX - rect.left) / CELL_W) + 1;
     const row = Math.floor((e.clientY - rect.top) / CELL_H) + 1;
     const tpl = placeTemplateRef.current || {};
+    const usedIds = new Set(fields.map(f => f.id));
     const nf = {
-      id: gid(), name: tpl.name ?? "", row: clamp(row, 1, ROWS), col: clamp(col, 1, COLS - 9),
+      id: gid(usedIds), name: tpl.name ?? "", row: clamp(row, 1, ROWS), col: clamp(col, 1, COLS - 9),
       length: tpl.length ?? 10, attrs: tpl.attrs ?? ["UNPROT", "NORM"],
       color: tpl.color ?? "DEFAULT", hilight: tpl.hilight ?? "OFF", case: tpl.case ?? "UPPER",
       initial: tpl.initial ?? "", picout: "", picin: "",
@@ -617,22 +639,22 @@ function BMSEditor() {
     setMode("idle");
     placeTemplateRef.current = null;
     setPlacingType(null);
-  }, [updFields]);
+  }, [fields, updFields]);
 
   /* ── Keyboard ── */
   useEffect(() => {
     const h = (e) => {
+      const inInput = isFormControl(e.target);
       // Undo/Redo — always available (unless typing in input)
-      if (e.key === "z" && (e.ctrlKey || e.metaKey) && !editId) {
+      if (e.key === "z" && (e.ctrlKey || e.metaKey) && !editId && !inInput) {
         e.preventDefault();
         if (e.shiftKey) redo(); else undo();
         return;
       }
-      if (e.key === "y" && (e.ctrlKey || e.metaKey) && !editId) {
+      if (e.key === "y" && (e.ctrlKey || e.metaKey) && !editId && !inInput) {
         e.preventDefault(); redo(); return;
       }
       if (showImp || showExp || showMs) return;
-      const inInput = ["INPUT","SELECT","TEXTAREA"].includes(document.activeElement?.tagName);
       if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.key) && selIds.size && !editId && !inInput) {
         e.preventDefault();
         const dr = e.key === "ArrowUp" ? -1 : e.key === "ArrowDown" ? 1 : 0;
@@ -663,7 +685,7 @@ function BMSEditor() {
         if (modeRef.current === "placing") { setMode("idle"); placeTemplateRef.current = null; setPlacingType(null); }
         if (editId) { setEditId(null); setEditTxt(""); setEditSel({s:0,e:0}); }
       }
-      if (e.key === "a" && (e.ctrlKey || e.metaKey) && !editId) {
+      if (e.key === "a" && (e.ctrlKey || e.metaKey) && !editId && !inInput) {
         e.preventDefault();
         setSelIds(new Set(fields.map(f => f.id)));
       }
@@ -694,7 +716,6 @@ function BMSEditor() {
   const doImport = useCallback(() => {
     try {
       const ms = parseBMS(impTxt);
-      _nid = ms.maps.reduce((a, m) => a + m.fields.length, 0) + 100;
       pushMs(ms); setSelIds(new Set()); setShowImp(false); setImpTxt("");
     } catch (err) { alert("Erro: " + err.message); }
   }, [impTxt, pushMs]);
